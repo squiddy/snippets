@@ -1,22 +1,43 @@
 #!/usr/bin/env python
 
 """
-Composite multiple wallpapers on one image that fits the current screen size.
-Each wallpaper will be centered on each screen, scaling it down if needed.
+Composite multiple wallpapers on one image that fits the current total screen
+size. Each wallpaper will be centered on each screen, scaling it down if needed.
 """
+
+from __future__ import division
 
 import argparse
 import os
 import random
 import re
 import subprocess
+from collections import defaultdict
+
+
+def subprocess_output(args):
+    stdout, stdin = subprocess.Popen(args, stdout=subprocess.PIPE).communicate()
+    return stdout
 
 
 def find_screens():
-    stdout, stdin = subprocess.Popen(["xrandr"], stdout=subprocess.PIPE).communicate()
-    screen_size = map(int, re.findall(r'current (\d+) x (\d+)', stdout)[0])
-    screens = re.findall(r'(\d+x\d+)\+(\d+\+\d+)', stdout)
+    data = subprocess_output(["xrandr"])
+    screen_size = map(int, re.findall(r'current (\d+) x (\d+)', data)[0])
+    matches = re.findall(r'(\d+x\d+)\+(\d+\+\d+)', data)
+    screens = []
+    for dimensions, offset in matches:
+        # Calculate aspect ratio. Used to find the wallpaper from the sample
+        # that fits this screen best.
+        width, height = map(int, dimensions.split('x'))
+        screens.append((dimensions, offset, width / height))
+
     return screen_size, screens
+
+
+def get_image_size(path):
+    data = subprocess_output(["identify", path])
+    width, height = map(int, re.findall(r'(\d+)x(\d+)\s', data)[0])
+    return width, height
 
 
 def find_wallpapers_recursive(path):
@@ -29,6 +50,24 @@ def find_wallpapers_recursive(path):
 
 def find_wallpapers(path):
     return map(lambda x: os.path.join(path, x), os.listdir(path))
+
+
+def find_best_fit(wallpapers, screens):
+    mappings = defaultdict(list)
+    for dimensions, offset, aspect_ratio in screens:
+        for image in wallpapers:
+            width, height = get_image_size(image)
+            mappings[offset].append((abs(aspect_ratio - width / height), image))
+
+    for screen in mappings:
+        mappings[screen] = [image for (difference, image) in sorted(mappings[screen])]
+
+    for screen in mappings:
+        for screen2 in mappings:
+            if screen == screen2:
+                continue
+            mappings[screen2].remove(mappings[screen][0])
+    return mappings
 
 
 def main():
@@ -45,12 +84,15 @@ def main():
         wallpapers = find_wallpapers(options.folder)
 
     screen_size, screens = find_screens()
+    chosen_wallpapers = random.sample(wallpapers, len(screens))
+
+    mappings = find_best_fit(chosen_wallpapers, screens)
 
     args = ["convert", "-size", "%dx%d" % tuple(screen_size), "xc:%s" % options.background]
 
-    for dimensions, offset in screens:
-        image = random.choice(wallpapers)
-        args += ["(", image, "-resize", "%s>" % dimensions,
+    for dimensions, offset, aspect_ratio in screens:
+        image = mappings[offset][0]
+        args += ["(", image, "-resize", "%s" % dimensions,
                  "-gravity", "center", "-background", options.background,
                  "-extent", dimensions, ")", "-gravity", "west",
                  "-geometry", "+%s" % offset, "-composite"]
